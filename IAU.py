@@ -6,14 +6,13 @@ import numpy as np
 import torch
 import yaml
 from torch import nn
-from torch.utils.data import DataLoader, SequentialSampler
+import torch.nn.functional as F
 import tqdm
 import time
 
 from datasets import min_tensors, max_tensors, JointDataset, CombineDataset
 from inverse_adversary import IAE_FGSM
-from models import distillation_loss
-from trainer import test_backdoor_ASR, test, train, eval
+from trainer import test, train, eval
 
 
 def IAU(ori_model, train_forget_loader, train_remain_loader, train_loader, test_loader, test_forget_loader, test_remain_loader,
@@ -23,17 +22,50 @@ def IAU(ori_model, train_forget_loader, train_remain_loader, train_loader, test_
         rally_epochs=10, rally_iae_num=20, rally_lr=0.01,
         data_name='cifar10', num_classes=10, forget_class=1, model_name='AllCNN', logger=None):
     """
-    :param strike_epochs: impair的epoch数
-    :param train_forget_loader: 后门实验时，这个参数为带trigger的后门数据
-    :param train_remain_loader: 如果num_forget<5000的话，这个集是包含良性遗忘类数据的
-    :param train_limited_remain_loader: 这个集不包含任何遗忘类数据的
+    Implements the Inverse Adversarial Unlearning (IAU) method.
 
-    :param test_loader: 正常实验时为完整test集合；后门实验时，为良性test集（不包含后门数据的remain数据）
-    :param bdchanged_test_forget_loader: 正常实验时为None；后门实验时，为带trigger的test后门集，用于测试ASR
-    :return:
+    :param ori_model: The original model to be unlearned.
+    :param train_forget_loader: DataLoader for only the limited number of samples in the class to be forgotten.
+    :param train_remain_loader: DataLoader for all samples in remaining classes.
+    :param train_loader: DataLoader for the entire training set.
+    :param test_loader: DataLoader for the entire test set.
+    :param test_forget_loader: DataLoader for the test set of the class to be forgotten.
+    :param test_remain_loader: DataLoader for the test set of the remaining classes.
+    :param train_full_forget_loader: DataLoader for the all samples in the class to be forgotten.
+    :param train_limited_remain_loader: DataLoader for only the limited number of samples in remaining classes.
+    :param strike_epochs: Number of epochs for the strike phase.
+    :param strike_iae_num: Number of inverse adversarial examples generated for each original sample in the strike phase.
+    :param strike_lr: Learning rate for the strike phase.
+    :param is_limited: Boolean indicating whether the data is limited.
+    :param limit_n: Number of samples per class in the limited remaining data.
+    :param rally_epochs: Number of epochs for the rally phase.
+    :param rally_iae_num: Number of inverse adversarial examples generated for each original sample in the rally phase.
+    :param rally_lr: Learning rate for the rally phase.
+    :param data_name: Name of the dataset.
+    :param num_classes: Number of classes in the dataset.
+    :param forget_class: Class label to be forgotten.
+    :param model_name: Name of the model architecture.
+    :param logger: Logger for recording training and testing information.
+
+    :return: The unlearned model and accuracy metrics.
     """
-    # iter(train_forget_loader)
-    params = locals()  # 获取所有参数及其值
+    Dr_n_str='Dr'+str(limit_n)
+    with open('config.yaml', 'r') as file:
+        config = yaml.safe_load(file)
+    try:
+        experiment_config = config[data_name][model_name][Dr_n_str]
+    except KeyError as e:
+        raise ValueError(f"Missing configuration for {e}")
+
+    # 将配置中的值赋给变量
+    strike_epochs = experiment_config.get('strike_epochs', None)
+    strike_iae_num = experiment_config.get('strike_iae_num', None)
+    strike_lr = experiment_config.get('strike_lr', None)
+    rally_epochs = experiment_config.get('rally_epochs', None)
+    rally_iae_num = experiment_config.get('rally_iae_num', None)
+    rally_lr = experiment_config.get('rally_lr', None)
+
+    params = locals()
     i = 0
     for key, value in params.items():
         if i >= 8:
@@ -52,6 +84,8 @@ def IAU(ori_model, train_forget_loader, train_remain_loader, train_loader, test_
 
     clip_min = min_tensors[data_name].to(device)
     clip_max = max_tensors[data_name].to(device)
+
+    # Strike stage
 
     iadv = IAE_FGSM(test_model, eps=4/255, eps_iter=4/255, clip_min=clip_min, clip_max=clip_max, targeted=True)
 
@@ -118,31 +152,6 @@ def IAU(ori_model, train_forget_loader, train_remain_loader, train_loader, test_
     logger.info('test remain acc: {}'.format(acc_tr))
     
     return unlearned_model, acc_df, acc_dr, acc_tf, acc_tr, total_unlearn_time
-
-
-def finetune(unlearn_model, train_remain_loader, device, finetune_epochs=1, lr=0.01, momentum=0.9, optimizer_name='SGD',
-             test_forget_loader=None, test_remain_loader=None, logger=None):
-    unl_model = copy.deepcopy(unlearn_model).to(device)
-    unl_model.zero_grad()
-    criterion = nn.CrossEntropyLoss()
-    if optimizer_name == 'SGD':
-        optimizer = torch.optim.SGD(unl_model.parameters(), lr=lr, momentum=momentum)
-    else:
-        optimizer = torch.optim.Adam(unl_model.parameters(), lr=lr)
-    lowest_loss = float('inf')
-    for ep in range(finetune_epochs):
-        loss = train(unl_model, train_remain_loader, criterion=criterion, optimizer=optimizer, loss_mode='cross',
-                     device=device)
-        if loss < lowest_loss:
-            lowest_loss = loss
-            ret_model = copy.deepcopy(unl_model).to(device)
-        logger.info('Average Loss value for finetune epoch {}: {}'.format(ep, loss.item()))
-        _, accf = eval(unl_model, test_forget_loader, device=device)
-        _, accr = eval(unl_model, test_remain_loader, device=device)
-        logger.info('test forget Loader eval acc: {}'.format(accf))
-        logger.info('test Remain Loader eval acc: {}'.format(accr))
-
-    return ret_model
 
 
 def rally(unlearn_model, original_model, train_forget_loader, train_remain_loader, device, finetune_epochs=1,
@@ -238,7 +247,6 @@ class JSDivLoss(nn.Module):
         kl_q_m = F.kl_div(torch.log(q), m, reduction='batchmean')  # KL(Q || M)
 
         js = 0.5 * (kl_p_m + kl_q_m)
-
         js = js * (temperature ** 2)
 
         return js

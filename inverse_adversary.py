@@ -46,6 +46,7 @@ class IAE_FGSM(Attack, LabelMixin):
                   - if None and self.targeted=False, compute y as predicted
                     labels.
                   - if self.targeted=True, then y must be the targeted labels.
+        :param num_iter: number of iteration
         :return: tensor containing perturbed inputs.
         """
 
@@ -59,7 +60,7 @@ class IAE_FGSM(Attack, LabelMixin):
             xadv = x + delta
             ori_features, ori_outputs = self.predict.extract_feature(x)
             features, outputs = self.predict.extract_feature(xadv)
-            temperature = 10.
+            temperature = 10.  # temperature to suppress the overly high confidence
             loss1 = self.loss_ce(outputs/temperature, y)
             loss2 = self.loss_kl(torch.log_softmax(xadv, dim=1), torch.softmax(x, dim=1))
             loss3 = self.loss_kl(torch.log_softmax(features[-1], dim=1), torch.softmax(ori_features[-1].detach(), dim=1))

@@ -6,7 +6,6 @@ from matplotlib import pyplot as plt
 import lipschitz
 from SSD import ParameterPerturber
 from datasets import CombineDataset
-from IAU import finetune
 from trainer import eval, loss_picker, optimizer_picker, test, train
 import numpy as np
 import torch
@@ -18,6 +17,7 @@ from collections import Counter
 
 import torch.nn.functional as F
 import torch.distributions as distributions
+
 
 class AttackBase(object):
     def __init__(self, model=None, norm=False, discrete=True, device=None, data_name=None):
@@ -136,6 +136,7 @@ class Noise(nn.Module):
         return self.noise
     
 
+# Negative Gradient
 def NG(ori_model, train_forget_loader, train_remain_loader, test_loader, test_forget_loader, test_remain_loader,
                     train_full_forget_loader=None, train_limited_remain_loader=None,
                     unlearn_epochs=8, lr=0.000005, momentum=0.9,
@@ -198,7 +199,8 @@ def NG(ori_model, train_forget_loader, train_remain_loader, test_loader, test_fo
 
     return unlearn_model
 
-# Implementation from https://www.dropbox.com/s/bwu543qsdy4s32i/Boundary-Unlearning-Code.zip?dl=0
+
+# Boundary Shrink Implementation from https://www.dropbox.com/s/bwu543qsdy4s32i/Boundary-Unlearning-Code.zip?dl=0
 def BS(ori_model, train_forget_loader, train_remain_loader, test_forget_loader, test_remain_loader,
                     test_loader, device, train_full_forget_loader=None, train_limited_remain_loader=None,
                     bound=0.1, poison_epoch=10, norm=True, lr=0.0001, momentum=0.9,
@@ -214,7 +216,7 @@ def BS(ori_model, train_forget_loader, train_remain_loader, test_forget_loader, 
     print("bs unlearn lr: ", lr)
     print("ep: ", poison_epoch)
     random_start = False  # False if attack != "pgd" else True
-    norm = False if data_name == 'mnist' else True  # BS用的参数
+    norm = False if data_name == 'mnist' else True
 
     test_model = copy.deepcopy(ori_model).to(device)
     unlearn_model = copy.deepcopy(ori_model).to(device)
@@ -229,12 +231,6 @@ def BS(ori_model, train_forget_loader, train_remain_loader, test_forget_loader, 
     num_hits = 0
     num_sum = 0
     nearest_label = []
-    show = False
-    draw = False
-    feature1_list = []
-    feature2_list = []
-    feature3_list = []
-    logit_list = []
 
     for epoch in tqdm.tqdm(range(poison_epoch), desc='Unlearning outer loop epochs={}'.format(poison_epoch)):
         for idx, (x, y) in enumerate(train_forget_loader):
@@ -245,13 +241,10 @@ def BS(ori_model, train_forget_loader, train_remain_loader, test_forget_loader, 
             x_adv = adv.perturb(x, y, target_y=None, model=test_model, device=device)
             teacher_adv_features, teacher_adv_logits = test_model.extract_feature(x_adv)
 
-            # 原模型对扰动数据生成的预测置信度
             pred_label = torch.argmax(teacher_adv_logits, dim=1)
             nearest_label.extend(pred_label.tolist())
 
-            # 扰动后的预测 和 遗忘数据标签 不同的数量【扰动后的预测应该尽可能的和原始标签不同】
             num_hits += (y != pred_label).float().sum()
-            # y的shape就是64(batch数), shape[0]是总的标签个数
             num_sum += y.shape[0]
 
             # adv_train
@@ -259,8 +252,7 @@ def BS(ori_model, train_forget_loader, train_remain_loader, test_forget_loader, 
             unlearn_model.zero_grad()
             optimizer.zero_grad()
 
-            # 原模型生成的预测 & 对抗数据生成标签 的loss
-            ori_features, ori_logits = unlearn_model.extract_feature(x)  # 遗忘样本
+            ori_features, ori_logits = unlearn_model.extract_feature(x)
             ori_loss = criterion(ori_logits, pred_label)
 
             ori_loss.backward()
@@ -399,7 +391,6 @@ def UNSIR(ori_model, train_forget_loader, train_remain_loader, test_loader, test
             assert out.shape == labels.shape
             running_acc += (labels == out).sum().item()
 
-        # print('batch number :', cnt)
     logger.info('impair time: {}'.format(time.time() - start_time))
     # test(unlearn_model, noisy_loader)
     # test(unlearn_model, test_loader, num_classes=num_classes, forget_class=forget_class, logger=logger)
@@ -561,3 +552,28 @@ def SSD(ori_model, train_forget_loader, train_remain_loader, train_loader, test_
     # test(unlearn_model, test_loader, num_classes=num_classes, forget_class=forget_class, logger=logger)
 
     return unlearn_model
+
+
+def finetune(unlearn_model, train_remain_loader, device, finetune_epochs=1, lr=0.01, momentum=0.9, optimizer_name='SGD',
+             test_forget_loader=None, test_remain_loader=None, logger=None):
+    unl_model = copy.deepcopy(unlearn_model).to(device)
+    unl_model.zero_grad()
+    criterion = nn.CrossEntropyLoss()
+    if optimizer_name == 'SGD':
+        optimizer = torch.optim.SGD(unl_model.parameters(), lr=lr, momentum=momentum)
+    else:
+        optimizer = torch.optim.Adam(unl_model.parameters(), lr=lr)
+    lowest_loss = float('inf')
+    for ep in range(finetune_epochs):
+        loss = train(unl_model, train_remain_loader, criterion=criterion, optimizer=optimizer, loss_mode='cross',
+                     device=device)
+        if loss < lowest_loss:
+            lowest_loss = loss
+            ret_model = copy.deepcopy(unl_model).to(device)
+        logger.info('Average Loss value for finetune epoch {}: {}'.format(ep, loss.item()))
+        _, accf = eval(unl_model, test_forget_loader, device=device)
+        _, accr = eval(unl_model, test_remain_loader, device=device)
+        logger.info('test forget Loader eval acc: {}'.format(accf))
+        logger.info('test Remain Loader eval acc: {}'.format(accr))
+
+    return ret_model

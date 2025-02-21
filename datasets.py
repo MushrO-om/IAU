@@ -266,7 +266,7 @@ def split_class_data(dataset, forget_class, num_forget, num_classes=10, limited_
     return forget_index, remain_index, class_remain_index, full_forget_index, limited_remain_index
 
 
-def get_unlearn_loader(trainset, testset, forget_class, batch_size, num_forget, repair_num_ratio=0.01, limited_remain_class_num=500, data_name='cifar10', num_classes=10):
+def get_unlearn_loader(trainset, testset, forget_class, batch_size, num_forget, limited_remain_class_num=500, data_name='cifar10', num_classes=10):
     train_forget_index, train_remain_index, forget_remain_train_index, full_forget_train_index, limited_remain_train_index \
         = split_class_data(trainset, forget_class, num_forget=num_forget, num_classes=num_classes, limited_remain_class_num=limited_remain_class_num)
     test_forget_index, test_remain_index, _, _, _ = split_class_data(testset, forget_class, num_forget=5000, num_classes=num_classes)

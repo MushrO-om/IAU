@@ -1,0 +1,9 @@
+mnist:
+  AllCNN:
+    Dr1:
+      strike_epochs: 1
+      strike_iae_num: 7
+      strike_lr: 0.001
+      rally_epochs: 10
+      rally_iae_num: 10
+      rally_lr: 0.001

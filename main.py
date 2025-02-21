@@ -7,14 +7,9 @@ from torch.utils.data import random_split
 
 from baselines import NG, BS, UNSIR, JiT, SSD
 from IAU import IAU
-from models import ResNetWithFeatureExtraction, AllCNNImprovedPlus
-
-# VGG16用mnist的时候记得改这里
-# from models import VGGWithFeatureExtraction_mnist as VGGWithFeatureExtraction
+from models import AllCNNImprovedPlus
 from models import VGGWithFeatureExtraction_cifar as VGGWithFeatureExtraction
-from preactrn18 import PreActResNet18
 
-from resnet_cifar10 import cifar10_resnet18
 from datasets import *
 from trainer import *
 import logging
@@ -28,7 +23,7 @@ result_dict = {
 }
 
 
-def seed_torch():
+def seed_torch(seed):
     np.random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -40,11 +35,11 @@ def recur_main(args, df_num, dr_num, logger):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     path = args.checkpoint_dir + '/'
 
-    # TODO: 在此更改。cifar10每个训练类有5000个样本，mnist每个类有6000。测试集每个类都是1000个
-    # num_forget = 20
+    forget_class = args.forget_class
+    num_classes = 100 if args.data_name == 'cifar100' else 10
     num_forget = df_num
-    limited_remain_class_num = dr_num  # cifar100限制50；cifar10限制100;vgg限制20
-    bd_num = 1000   # 加trigger的数量
+    limited_remain_class_num = dr_num
+    bd_num = args.num_backdoor   # the number of samples to be added trigger in backdoor test
 
     # 打印实验配置
     logger.info('+' * 100)
@@ -69,6 +64,7 @@ def recur_main(args, df_num, dr_num, logger):
 
     train_loader, test_loader = get_dataloader(trainset, testset, args.batch_size, device=device)
 
+    # load retrain-from-scratch checkpoint
     if args.train == 'load_retrain':
         logger.info('=' * 100)
         logger.info(' ' * 25 + 'load retrain model')
@@ -90,6 +86,7 @@ def recur_main(args, df_num, dr_num, logger):
         logger.info('Train Remain Acc: {}'.format(Dr_acc))
         test(retrain_model, test_loader, num_classes=num_classes, forget_class=forget_class, logger=logger)
 
+    # retrain from scratch without target classes
     elif args.train == 'retrain':
         logger.info('=' * 100)
         logger.info(' ' * 25 + 'retrain model from scratch')
@@ -105,7 +102,7 @@ def recur_main(args, df_num, dr_num, logger):
         test(retrain_model, train_remain_loader, num_classes=num_classes, forget_class=forget_class, logger=logger)
         test(retrain_model, test_loader, num_classes=num_classes, forget_class=forget_class, logger=logger)
 
-
+    # train original model with the entire dataset
     elif args.train == 'train':
         logger.info('=' * 100)
         logger.info(' ' * 25 + 'train original model only')
@@ -129,6 +126,7 @@ def recur_main(args, df_num, dr_num, logger):
 
             test(ori_model, test_loader, num_classes=num_classes, forget_class=forget_class, logger=logger)
 
+    # load original model
     elif args.train == 'load':
         logger.info('=' * 100)
         logger.info(' ' * 25 + 'load original model and retrain model')
@@ -180,19 +178,21 @@ def recur_main(args, df_num, dr_num, logger):
                 ori_model = torch.load(
                     path + args.data_name + args.model_name + "_original_model_ep{}_lr{}_filter1_best".format(args.epoch, args.lr) + ".pth", map_location=torch.device('cpu')).to(device)
 
-            # logger.info('\noriginal model acc:\n')
-            # _, Df_acc = eval(model=ori_model, data_loader=train_forget_loader, mode='', print_perform=False, device=device)
-            # _, Dr_acc = eval(model=ori_model, data_loader=train_remain_loader, mode='', print_perform=False, device=device)
-            # logger.info('Train Forget Acc: {}'.format(Df_acc))
-            # logger.info('Train Remain Acc: {}'.format(Dr_acc))
+            logger.info('\noriginal model acc:\n')
+            _, Df_acc = eval(model=ori_model, data_loader=train_forget_loader, mode='', print_perform=False, device=device)
+            _, Dr_acc = eval(model=ori_model, data_loader=train_remain_loader, mode='', print_perform=False, device=device)
+            logger.info('Train Forget Acc: {}'.format(Df_acc))
+            logger.info('Train Remain Acc: {}'.format(Dr_acc))
             # test(ori_model, test_loader, num_classes=num_classes, forget_class=forget_class, logger=logger)
 
     """
     =========================== unlearn part ===========================
     """
+    # load unlearned checkpoint
     if args.load_ul == True:
         unlearn_model = torch.load(path+'IAU/'+'{}_{}_Dr{}_seed{}.pth'.format(args.data_name, args.model_name, dr_num, seed))
 
+    # begin unlearning
     else:
         if args.method == 'BS':
             logger.info('*' * 100)
@@ -215,7 +215,6 @@ def recur_main(args, df_num, dr_num, logger):
                                 limit_n=df_num, data_name=args.data_name, num_classes=num_classes,
                                 forget_class=forget_class, model_name=args.model_name,
                                 logger=logger)
-
         elif args.method == 'UNSIR':
             logger.info('*' * 100)
             logger.info(' ' * 25 + 'begin UNSIR unlearning')
@@ -225,7 +224,6 @@ def recur_main(args, df_num, dr_num, logger):
                                   data_name=args.data_name, num_classes=num_classes,
                                   forget_class=forget_class, model_name=args.model_name,
                                   logger=logger)
-
         elif args.method == 'jit':
             logger.info('*' * 100)
             logger.info(' ' * 25 + 'begin JiT unlearning')
@@ -267,7 +265,7 @@ def recur_main(args, df_num, dr_num, logger):
     logger.info('********final test*********')
 
     """
-    backdoor
+    backdoor test
     """
     # test(unlearn_model, test_loader)
     # test(unlearn_model, train_oriforget_loader)
@@ -286,12 +284,13 @@ def set_up():
                         help='model name')
     parser.add_argument('--optim_name', type=str, default='sgd', choices=['sgd', 'adam'], help='optimizer name')
     parser.add_argument('--lr', type=float, default=0.01, help='original training learning rate')
-    parser.add_argument('--epoch', type=int, default=20, help='original training epoch')
-    parser.add_argument('--forget_class', type=int, default=4, help='the target forget class index')
+    parser.add_argument('--epoch', type=int, default=30, help='original training epoch')
+    parser.add_argument('--forget_class', type=int, default=1, help='the target forget class index')
     parser.add_argument('--dataset_dir', type=str, default='./data', help='dataset directory')
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints', help='checkpoints directory')
     parser.add_argument('--batch_size', type=int, default=64, help='batch size')
     parser.add_argument('--if_backdoor', action='store_true', default=False, help='if backdoor attack')
+    parser.add_argument('--num_backdoor', type=int, default=1000, help='number of samples to be backdoored')
     parser.add_argument('--train', type=str, default='load',
                         choices=['load_retrain', 'train', 'retrain', 'load'],
                         help='Train model from scratch')
@@ -316,7 +315,7 @@ def set_up():
 
 if __name__ == '__main__':
     args, logger = set_up()
-    for seed in range(2024, 2025, 1):
+    for seed in range(2024, 2026, 1):
         seed_torch(seed)
         logger.info('----------------seed = {}----------------------'.format(seed))
         recur_main(args, args.num_forget, args.num_remain, logger)
